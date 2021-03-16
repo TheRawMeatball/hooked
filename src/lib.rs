@@ -5,7 +5,7 @@ mod internal;
 
 pub use fctx::Fctx;
 
-pub use internal::{panel, text, Context, Element, ComponentFunc};
+pub use internal::{ComponentFunc, Context, Element, Panel, Text};
 
 #[cfg(test)]
 mod tests;

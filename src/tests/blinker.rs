@@ -1,6 +1,6 @@
 use std::thread;
 
-use crate::{text, ComponentFunc, Element, Fctx};
+use crate::{Element, Fctx, Text};
 
 pub fn fnc_blinker(ctx: Fctx, period: &u64) -> Vec<Element> {
     let (is_on, set_is_on) = ctx.use_state(|| false);
@@ -20,8 +20,8 @@ pub fn fnc_blinker(ctx: Fctx, period: &u64) -> Vec<Element> {
     });
 
     if *is_on {
-        vec![text.e((format!("Yay! - Period = {}", period),))]
+        vec![Text::E(format!("Yay! - Period = {}", period))]
     } else {
-        vec![text.e((format!("Nay! - Period = {}", period),))]
+        vec![Text::E(format!("Nay! - Period = {}", period))]
     }
 }

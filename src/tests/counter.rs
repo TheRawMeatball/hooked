@@ -1,6 +1,6 @@
 use std::thread;
 
-use crate::{internal::Element, text, ComponentFunc, Fctx};
+use crate::{internal::Element, Fctx, Text};
 
 pub fn fnc_counter(ctx: Fctx) -> Vec<Element> {
     let (state, state_setter) = ctx.use_state(|| 0);
@@ -18,5 +18,5 @@ pub fn fnc_counter(ctx: Fctx) -> Vec<Element> {
         move || tx.send(()).unwrap()
     });
 
-    vec![text.e((format!("{} seconds since creation!", state),))]
+    vec![Text::E(format!("{} seconds since creation!", &*state))]
 }

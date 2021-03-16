@@ -1,10 +1,13 @@
-use std::any::{Any, TypeId};
+use std::{
+    any::{Any, TypeId},
+    cell::RefCell,
+    rc::Rc,
+};
 
-use append_vec::AppendVec;
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::components::Components;
 use crate::dom::{Dom, Primitive, PrimitiveId};
+use crate::{components::Components, fctx::Memo};
 
 use crate::Fctx;
 
@@ -46,7 +49,8 @@ pub(crate) enum EffectStage {
 pub(crate) struct Component {
     f: Box<dyn DynComponentFunc>,
     props: Box<dyn Prop>,
-    state: AppendVec<dyn Any>,
+    state: Vec<Rc<dyn Any>>,
+    memos: Vec<Rc<RefCell<Memo>>>,
     effects: Vec<Effect>,
     dirty: bool,
 }
@@ -124,8 +128,9 @@ impl Context {
                 // TODO: cull unnecessary effects
                 // TODO: start rerenders from the leaves
                 let component = &mut self.components.get(resolver.target_component);
-                let state = &mut component.state.inner()[resolver.target_state as usize];
-                (resolver.f)(&mut **state);
+                let rc = &mut component.state[resolver.target_state as usize];
+                let state = Rc::get_mut(rc).unwrap();
+                (resolver.f)(state);
                 component.dirty = true;
             }
             self.root
@@ -153,11 +158,12 @@ impl Mounted {
             }
             ElementInner::Component(c) => {
                 let id = components.allocate();
-                let state = AppendVec::new();
+                let mut state = Vec::new();
+                let mut memos = Vec::new();
                 let mut effects = Vec::new();
                 let ro = c.f.call(
                     &*c.props,
-                    Fctx::render_first(tx.clone(), id, &state, &mut effects),
+                    Fctx::render_first(tx.clone(), id, &mut state, &mut memos, &mut effects),
                 );
                 let children = ro
                     .into_iter()
@@ -178,6 +184,7 @@ impl Mounted {
                         f: c.f,
                         props: c.props,
                         state,
+                        memos,
                         effects,
                         dirty: false,
                     },
@@ -213,7 +220,13 @@ impl Mounted {
                     components.with(*id, |old, components| {
                         let new_children = old.f.call(
                             &*new.props,
-                            Fctx::update(tx.clone(), *id, &old.state, &mut old.effects),
+                            Fctx::update(
+                                tx.clone(),
+                                *id,
+                                &mut old.state,
+                                &mut old.memos,
+                                &mut old.effects,
+                            ),
                         );
                         let mut new_children = new_children.into_iter();
                         let mut remove_index = -1isize;
@@ -267,7 +280,13 @@ impl Mounted {
                         updated_children = true;
                         let new_children = c.f.call(
                             &*c.props,
-                            Fctx::update(tx.clone(), *id, &c.state, &mut c.effects),
+                            Fctx::update(
+                                tx.clone(),
+                                *id,
+                                &mut c.state,
+                                &mut c.memos,
+                                &mut c.effects,
+                            ),
                         );
                         let mut new_children = new_children.into_iter();
                         let mut remove_index = -1isize;
@@ -390,16 +409,14 @@ impl<P: Any> DynComponentFunc for Box<dyn ComponentFunc<P>> {
     }
 }
 
-pub fn text(_: Fctx, data: &String) -> Vec<Element> {
-    vec![Element(ElementInner::Primitive(
-        Primitive::Text(data.to_owned()),
-        vec![],
-    ))]
+pub struct Panel;
+impl Panel {
+    pub const E: fn(Vec<Element>) -> Element =
+        |children: Vec<Element>| Element(ElementInner::Primitive(Primitive::Panel, children));
 }
 
-pub fn panel(_: Fctx, children: &Vec<Element>) -> Vec<Element> {
-    vec![Element(ElementInner::Primitive(
-        Primitive::Panel,
-        children.clone(),
-    ))]
+pub struct Text;
+impl Text {
+    pub const E: fn(String) -> Element =
+        |text: String| Element(ElementInner::Primitive(Primitive::Text(text), vec![]));
 }
