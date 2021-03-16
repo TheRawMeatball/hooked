@@ -14,7 +14,7 @@ pub trait Dom {
     }
     fn mount_as_child(&mut self, primitive: Primitive, parent: Option<PrimitiveId>) -> PrimitiveId;
     fn diff_primitive(&mut self, old: PrimitiveId, new: Primitive);
-    fn get_sub_list(&mut self, id: PrimitiveId) -> (PrimitiveId, &mut dyn Dom);
+    fn get_sub_context(&mut self, id: PrimitiveId) -> (PrimitiveId, &mut dyn Dom);
     fn remove(&mut self, id: PrimitiveId);
     fn commit(&mut self) {}
 }
@@ -28,7 +28,7 @@ impl<T: Dom + ?Sized> Dom for (PrimitiveId, &mut T) {
         self.1.diff_primitive(old, new)
     }
 
-    fn get_sub_list(&mut self, id: PrimitiveId) -> (PrimitiveId, &mut dyn Dom) {
+    fn get_sub_context(&mut self, id: PrimitiveId) -> (PrimitiveId, &mut dyn Dom) {
         (id, self)
     }
 

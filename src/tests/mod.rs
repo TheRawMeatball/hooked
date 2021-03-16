@@ -39,7 +39,7 @@ impl Display for DemoDom {
                 Primitive::Text(text) => writeln!(f, "{}", text)?,
                 Primitive::Panel => writeln!(f, "[Fancy Panel]")?,
             }
-            for child in children.iter().rev() {
+            for child in children.iter() {
                 recursor(f, *child, nest_level + 1, dom)?;
             }
             Ok(())
@@ -76,7 +76,7 @@ impl Dom for DemoDom {
         id
     }
 
-    fn get_sub_list(&mut self, id: PrimitiveId) -> (PrimitiveId, &mut dyn Dom) {
+    fn get_sub_context(&mut self, id: PrimitiveId) -> (PrimitiveId, &mut dyn Dom) {
         (id, self)
     }
 }

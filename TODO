@@ -1,4 +1,3 @@
-- Flatten hierarchy
 - Remove dirty flagging
 - Make DOM a concrete type
 - Bevy integration

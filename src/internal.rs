@@ -1,6 +1,7 @@
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
+    collections::HashMap,
     rc::Rc,
 };
 
@@ -22,6 +23,8 @@ pub(crate) struct EffectResolver {
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub(crate) struct ComponentId(pub u64);
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub(crate) struct MountedId(pub u64);
 
 pub trait ComponentFunc<P, M>: 'static {
     fn e(&self, p: P) -> Element;
@@ -74,7 +77,6 @@ trait Prop {
 
 impl<T: Any + Clone> Prop for T {
     fn as_any(&self) -> &dyn Any {
-        println!("{}", std::any::type_name::<Self>());
         self
     }
 
@@ -98,28 +100,36 @@ enum ElementInner {
 #[derive(Clone)]
 pub struct Element(ElementInner);
 
+#[derive(Clone, Copy)]
 enum Mounted {
-    Primitive(PrimitiveId, Vec<Mounted>),
-    Component(ComponentId, Vec<Mounted>),
+    Primitive(PrimitiveId),
+    Component(ComponentId),
 }
 
 pub struct Context {
-    root: Mounted,
+    root: MountedId,
     components: Components,
+    tree: HashMap<MountedId, (Mounted, Vec<MountedId>)>,
+    counter: u64,
     tx: Tx,
     rx: Rx,
 }
 
 impl Context {
     pub fn new(element: Element, dom: &mut impl Dom) -> Self {
-        let mut components = Components::new();
+        let components = Components::new();
         let (tx, rx) = crossbeam_channel::unbounded();
-        Self {
-            root: Mounted::mount(element, dom, &mut components, &tx),
+        let tree = HashMap::new();
+        let mut ctx = Self {
+            root: MountedId(0),
             components,
+            tree,
             tx,
             rx,
-        }
+            counter: 0,
+        };
+        ctx.root = ctx.mount(element, dom);
+        ctx
     }
     pub fn process_messages(&mut self, dom: &mut impl Dom) {
         dom.start();
@@ -133,8 +143,9 @@ impl Context {
                 (resolver.f)(state);
                 component.dirty = true;
             }
-            self.root
-                .rerender_flagged(dom, &mut self.components, &self.tx);
+            let mut root = self.root;
+            self.rerender_flagged(&mut root, dom);
+            self.root = root;
         }
         dom.commit();
     }
@@ -142,33 +153,32 @@ impl Context {
     pub fn msg_count(&self) -> usize {
         self.rx.len()
     }
-}
 
-impl Mounted {
-    fn mount(element: Element, dom: &mut impl Dom, components: &mut Components, tx: &Tx) -> Self {
+    fn mount(&mut self, element: Element, dom: &mut impl Dom) -> MountedId {
         match element.0 {
             ElementInner::Primitive(p, c) => {
                 let id = dom.mount(p);
-                let mut child_ctx = dom.get_sub_list(id);
+                let mut child_ctx = dom.get_sub_context(id);
                 let children = c
                     .into_iter()
-                    .map(|v| Self::mount(v, &mut child_ctx, components, tx))
+                    .map(|v| self.mount(v, &mut child_ctx))
                     .collect();
-                Self::Primitive(id, children)
+                let mounted_id = MountedId(self.counter);
+                self.counter += 1;
+                self.tree
+                    .insert(mounted_id, (Mounted::Primitive(id), children));
+                mounted_id
             }
             ElementInner::Component(c) => {
-                let id = components.allocate();
+                let id = self.components.allocate();
                 let mut state = Vec::new();
                 let mut memos = Vec::new();
                 let mut effects = Vec::new();
                 let ro = c.f.call(
                     &*c.props,
-                    Fctx::render_first(tx.clone(), id, &mut state, &mut memos, &mut effects),
+                    Fctx::render_first(self.tx.clone(), id, &mut state, &mut memos, &mut effects),
                 );
-                let children = ro
-                    .into_iter()
-                    .map(|e| Self::mount(e, dom, components, tx))
-                    .collect();
+                let children = ro.into_iter().map(|e| self.mount(e, dom)).collect();
                 for effect in effects.iter_mut() {
                     replace_with::replace_with_or_abort(effect, |effect| match effect.f {
                         EffectStage::Effect(e) => Effect {
@@ -178,7 +188,7 @@ impl Mounted {
                         EffectStage::Destructor(_) => effect,
                     });
                 }
-                components.fill(
+                self.components.insert(
                     id,
                     Component {
                         f: c.f,
@@ -189,158 +199,26 @@ impl Mounted {
                         dirty: false,
                     },
                 );
-                Self::Component(id, children)
+                let mounted_id = MountedId(self.counter);
+                self.counter += 1;
+                self.tree
+                    .insert(mounted_id, (Mounted::Component(id), children));
+                mounted_id
             }
         }
     }
 
-    fn diff(&mut self, other: Element, dom: &mut impl Dom, components: &mut Components, tx: &Tx) {
-        let mut this = self;
-        match (&mut this, other.0) {
-            (Mounted::Primitive(id, children), ElementInner::Primitive(new, new_children)) => {
-                dom.diff_primitive(*id, new);
-                let mut remove_index = -1isize;
-                let mut dom = dom.get_sub_list(*id);
-                let mut new_children = new_children.into_iter();
-                for (i, child) in children.iter_mut().enumerate() {
-                    if let Some(new_child) = new_children.next() {
-                        child.diff(new_child, &mut dom, components, tx);
-                        remove_index = i as isize;
-                    }
-                }
-                for child in children.drain((remove_index + 1) as usize..) {
-                    child.unmount(&mut dom, components);
-                }
-                for remaining in new_children {
-                    children.push(Self::mount(remaining, &mut dom, components, tx));
-                }
-            }
-            (Mounted::Component(id, children), ElementInner::Component(new)) => {
-                if components.get(*id).f.fn_type_id() == new.f.fn_type_id() {
-                    components.with(*id, |old, components| {
-                        let new_children = old.f.call(
-                            &*new.props,
-                            Fctx::update(
-                                tx.clone(),
-                                *id,
-                                &mut old.state,
-                                &mut old.memos,
-                                &mut old.effects,
-                            ),
-                        );
-                        let mut new_children = new_children.into_iter();
-                        let mut remove_index = -1isize;
-                        for child in children.iter_mut() {
-                            if let Some(new_child) = new_children.next() {
-                                child.diff(new_child, dom, components, tx);
-                                remove_index += 1;
-                            }
-                        }
-                        for child in children.drain((remove_index + 1) as usize..) {
-                            child.unmount(dom, components);
-                        }
-                        for remaining in new_children {
-                            children.push(Self::mount(remaining, dom, components, tx));
-                        }
-                        for effect in old.effects.iter_mut() {
-                            replace_with::replace_with_or_abort(effect, |effect| match effect.f {
-                                EffectStage::Effect(e) => Effect {
-                                    eq_cache: effect.eq_cache,
-                                    f: EffectStage::Destructor(e()),
-                                },
-                                EffectStage::Destructor(_) => effect,
-                            });
-                        }
-                    });
-                } else {
-                    for child in children.drain(..) {
-                        child.unmount(dom, components);
-                    }
-                    replace_with::replace_with_or_abort(this, |v| {
-                        v.unmount(dom, components);
-                        Self::mount(Element(ElementInner::Component(new)), dom, components, tx)
-                    });
-                }
-            }
-            (_, new) => {
-                replace_with::replace_with_or_abort(this, |v| {
-                    v.unmount(dom, components);
-                    Self::mount(Element(new), dom, components, tx)
-                });
-            }
+    fn unmount(&mut self, this: MountedId, dom: &mut impl Dom) {
+        let (this, children) = self.tree.remove(&this).unwrap();
+        for child in children {
+            self.unmount(child, dom);
         }
-    }
-
-    fn rerender_flagged(&mut self, dom: &mut impl Dom, components: &mut Components, tx: &Tx) {
-        match self {
-            Mounted::Component(id, children) => {
-                let mut updated_children = false;
-                if components.get(*id).dirty {
-                    components.with(*id, |c, components| {
-                        updated_children = true;
-                        let new_children = c.f.call(
-                            &*c.props,
-                            Fctx::update(
-                                tx.clone(),
-                                *id,
-                                &mut c.state,
-                                &mut c.memos,
-                                &mut c.effects,
-                            ),
-                        );
-                        let mut new_children = new_children.into_iter();
-                        let mut remove_index = -1isize;
-                        for child in children.iter_mut() {
-                            if let Some(new_child) = new_children.next() {
-                                child.diff(new_child, dom, components, tx);
-                                remove_index += 1;
-                            }
-                        }
-                        for child in children.drain((remove_index + 1) as usize..) {
-                            child.unmount(dom, components);
-                        }
-                        for remaining in new_children {
-                            children.push(Self::mount(remaining, dom, components, tx));
-                        }
-                        for effect in c.effects.iter_mut() {
-                            replace_with::replace_with_or_abort(effect, |effect| match effect.f {
-                                EffectStage::Effect(e) => Effect {
-                                    eq_cache: effect.eq_cache,
-                                    f: EffectStage::Destructor(e()),
-                                },
-                                EffectStage::Destructor(_) => effect,
-                            });
-                        }
-                    });
-                }
-                if !updated_children {
-                    for child in children.iter_mut() {
-                        child.rerender_flagged(dom, components, tx);
-                    }
-                }
-            }
-            Mounted::Primitive(id, children) => {
-                for child in children {
-                    let mut dom = dom.get_sub_list(*id);
-                    child.rerender_flagged(&mut dom, components, tx);
-                }
-            }
-        }
-    }
-
-    fn unmount(self, dom: &mut impl Dom, components: &mut Components) {
-        match self {
-            Mounted::Primitive(id, children) => {
-                for child in children.into_iter() {
-                    child.unmount(dom, components)
-                }
+        match this {
+            Mounted::Primitive(id) => {
                 dom.remove(id);
             }
-            Mounted::Component(c, children) => {
-                for child in children.into_iter() {
-                    child.unmount(dom, components)
-                }
-                for effect in components.take(c).effects.into_iter() {
+            Mounted::Component(c) => {
+                for effect in self.components.take(c).effects.into_iter() {
                     match effect.f {
                         EffectStage::Destructor(d) => d(),
                         _ => {}
@@ -348,6 +226,139 @@ impl Mounted {
                 }
             }
         }
+    }
+
+    fn diff(&mut self, this_id: &mut MountedId, other: Element, dom: &mut impl Dom) {
+        let (this, mut children) = self.tree.remove(&this_id).unwrap();
+        match (this, other.0) {
+            (Mounted::Primitive(id), ElementInner::Primitive(new, new_children)) => {
+                dom.diff_primitive(id, new);
+                let mut dom = dom.get_sub_context(id);
+                let mut new_children = new_children.into_iter();
+                for child in children.iter_mut() {
+                    if let Some(new_child) = new_children.next() {
+                        self.diff(child, new_child, &mut dom);
+                    } else {
+                        self.unmount(*child, &mut dom);
+                    }
+                }
+                for remaining in new_children {
+                    children.push(self.mount(remaining, &mut dom));
+                }
+                self.tree.insert(*this_id, (this, children));
+            }
+            (Mounted::Component(id), ElementInner::Component(new)) => {
+                if self.components.get(id).f.fn_type_id() == new.f.fn_type_id() {
+                    let mut old = self.components.take(id);
+                    let new_children = old.f.call(
+                        &*new.props,
+                        Fctx::update(
+                            self.tx.clone(),
+                            id,
+                            &mut old.state,
+                            &mut old.memos,
+                            &mut old.effects,
+                        ),
+                    );
+                    let mut new_children = new_children.into_iter();
+                    let mut remove_index = -1i32;
+                    for child in children.iter_mut() {
+                        if let Some(new_child) = new_children.next() {
+                            self.diff(child, new_child, dom);
+                            remove_index += 1;
+                        }
+                    }
+                    for child in children.drain((remove_index + 1) as usize..) {
+                        self.unmount(child, dom);
+                    }
+                    for remaining in new_children {
+                        children.push(self.mount(remaining, dom));
+                    }
+                    for effect in old.effects.iter_mut() {
+                        replace_with::replace_with_or_abort(effect, |effect| match effect.f {
+                            EffectStage::Effect(e) => Effect {
+                                eq_cache: effect.eq_cache,
+                                f: EffectStage::Destructor(e()),
+                            },
+                            EffectStage::Destructor(_) => effect,
+                        });
+                    }
+                    self.components.insert(id, old);
+                    self.tree.insert(*this_id, (this, children));
+                } else {
+                    for child in children.drain(..) {
+                        self.unmount(child, dom);
+                    }
+                    self.tree.insert(*this_id, (this, children));
+                    self.unmount(*this_id, dom);
+                    *this_id = self.mount(Element(ElementInner::Component(new)), dom);
+                }
+            }
+            (_, new) => {
+                self.tree.insert(*this_id, (this, children));
+                self.unmount(*this_id, dom);
+                *this_id = self.mount(Element(new), dom);
+            }
+        }
+    }
+
+    fn rerender_flagged(&mut self, this_id: &mut MountedId, dom: &mut impl Dom) {
+        let (this, mut children) = self.tree.remove(&this_id).unwrap();
+        match this {
+            Mounted::Component(id) => {
+                let mut updated_children = false;
+                if self.components.get(id).dirty {
+                    let mut c = self.components.take(id);
+                    updated_children = true;
+                    let new_children = c.f.call(
+                        &*c.props,
+                        Fctx::update(
+                            self.tx.clone(),
+                            id,
+                            &mut c.state,
+                            &mut c.memos,
+                            &mut c.effects,
+                        ),
+                    );
+                    let mut new_children = new_children.into_iter();
+                    let mut remove_index = -1isize;
+                    for child in children.iter_mut() {
+                        if let Some(new_child) = new_children.next() {
+                            self.diff(child, new_child, dom);
+                            remove_index += 1;
+                        }
+                    }
+                    for child in children.drain((remove_index + 1) as usize..) {
+                        self.unmount(child, dom);
+                    }
+                    for remaining in new_children {
+                        children.push(self.mount(remaining, dom));
+                    }
+                    for effect in c.effects.iter_mut() {
+                        replace_with::replace_with_or_abort(effect, |effect| match effect.f {
+                            EffectStage::Effect(e) => Effect {
+                                eq_cache: effect.eq_cache,
+                                f: EffectStage::Destructor(e()),
+                            },
+                            EffectStage::Destructor(_) => effect,
+                        });
+                    }
+                    self.components.insert(id, c);
+                }
+                if !updated_children {
+                    for child in children.iter_mut() {
+                        self.rerender_flagged(child, dom);
+                    }
+                }
+            }
+            Mounted::Primitive(id) => {
+                for child in children.iter_mut() {
+                    let mut dom = dom.get_sub_context(id);
+                    self.rerender_flagged(child, &mut dom);
+                }
+            }
+        }
+        self.tree.insert(*this_id, (this, children));
     }
 }
 

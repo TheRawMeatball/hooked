@@ -23,19 +23,13 @@ impl Components {
         self.inner.remove(&id).unwrap()
     }
 
-    pub fn with<F: FnOnce(&mut Component, &mut Self)>(&mut self, id: ComponentId, f: F) {
-        let mut val = self.take(id);
-        f(&mut val, self);
-        self.inner.insert(id, val);
-    }
-
     pub fn allocate(&mut self) -> ComponentId {
         let id = ComponentId(self.counter);
         self.counter += 1;
         id
     }
 
-    pub fn fill(&mut self, id: ComponentId, component: Component) {
+    pub fn insert(&mut self, id: ComponentId, component: Component) {
         self.inner.insert(id, component);
     }
 }
