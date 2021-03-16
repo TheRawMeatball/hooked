@@ -1,8 +1,8 @@
 use std::thread;
 
-use crate::{internal::Element, Fctx, Text};
+use crate::prelude::*;
 
-pub fn fnc_counter(ctx: Fctx) -> Vec<Element> {
+pub fn counter(ctx: Fctx) -> Element {
     let (state, state_setter) = ctx.use_state(|| 0);
     ctx.use_effect(Some(()), || {
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -18,5 +18,5 @@ pub fn fnc_counter(ctx: Fctx) -> Vec<Element> {
         move || tx.send(()).unwrap()
     });
 
-    vec![Text::E(format!("{} seconds since creation!", &*state))]
+    e::text(format!("{} seconds since creation!", &*state))
 }

@@ -1,8 +1,8 @@
 use std::thread;
 
-use crate::{Element, Fctx, Text};
+use crate::prelude::*;
 
-pub fn fnc_blinker(ctx: Fctx, period: &u64) -> Vec<Element> {
+pub fn blinker(ctx: Fctx, period: &u64) -> Element {
     let (is_on, set_is_on) = ctx.use_state(|| false);
     let period = *period;
     ctx.use_effect(Some(period), move || {
@@ -20,8 +20,8 @@ pub fn fnc_blinker(ctx: Fctx, period: &u64) -> Vec<Element> {
     });
 
     if *is_on {
-        vec![Text::E(format!("Yay! - Period = {}", period))]
+        e::text(format!("Yay! - Period = {}", period))
     } else {
-        vec![Text::E(format!("Nay! - Period = {}", period))]
+        e::text(format!("Nay! - Period = {}", period))
     }
 }

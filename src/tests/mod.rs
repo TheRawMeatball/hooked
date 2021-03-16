@@ -3,7 +3,8 @@ mod counter;
 
 use crate::dom::{Dom, Primitive, PrimitiveId};
 
-use super::*;
+use crate::prelude::*;
+
 use std::{collections::HashMap, fmt::Display};
 
 use blinker::*;
@@ -83,19 +84,16 @@ impl Dom for DemoDom {
 #[test]
 fn demo() {
     let mut dom = DemoDom::default();
-    println!("{:?}", std::any::TypeId::of::<()>());
-    let mut context = Context::new(
-        Panel::E(vec![
-            fnc_counter.e(()),
-            fnc_blinker.e((3,)),
-            fnc_blinker.e((5,)),
-        ]),
-        &mut dom,
-    );
+
+    let mut context = Context::new(app(), &mut dom);
     loop {
         if context.msg_count() > 0 {
             context.process_messages(&mut dom);
             println!("{}", &dom);
         }
     }
+}
+
+fn app() -> Element {
+    e::panel([counter.e(()), blinker.e((3,)), blinker.e((5,))])
 }

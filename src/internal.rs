@@ -9,7 +9,7 @@ use crossbeam_channel::{Receiver, Sender};
 use crate::dom::{Dom, Primitive, PrimitiveId};
 use crate::{components::Components, fctx::Memo};
 
-use crate::Fctx;
+use crate::fctx::Fctx;
 
 pub(crate) type Tx = Sender<EffectResolver>;
 pub(crate) type Rx = Receiver<EffectResolver>;
@@ -23,15 +23,15 @@ pub(crate) struct EffectResolver {
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub(crate) struct ComponentId(pub u64);
 
-pub trait ComponentFunc<P>: 'static {
+pub trait ComponentFunc<P, M>: 'static {
     fn e(&self, p: P) -> Element;
-    fn call(&self, p: &P, ctx: Fctx) -> Vec<Element>;
+    fn call(&self, p: &P, ctx: Fctx) -> ComponentOutput;
     fn fn_type_id(&self) -> TypeId;
-    fn dyn_clone(&self) -> Box<dyn ComponentFunc<P>>;
+    fn dyn_clone(&self) -> Box<dyn ComponentFunc<P, M>>;
 }
 
 trait DynComponentFunc {
-    fn call(&self, p: &dyn Prop, ctx: Fctx) -> Vec<Element>;
+    fn call(&self, p: &dyn Prop, ctx: Fctx) -> ComponentOutput;
     fn fn_type_id(&self) -> TypeId;
     fn dyn_clone(&self) -> Box<dyn DynComponentFunc>;
 }
@@ -354,28 +354,30 @@ impl Mounted {
 macro_rules! impl_functions {
     ($($ident: ident),*) => {
         #[allow(non_snake_case)]
-        impl<Func, $($ident,)*> ComponentFunc<($($ident,)*)> for Func
+        impl<Func, Out, $($ident,)*> ComponentFunc<($($ident,)*), Out> for Func
         where
             $($ident: Any + Clone,)*
-            Func: Fn(Fctx, $(&$ident,)*) -> Vec<Element> + Copy + 'static,
+            Func: Fn(Fctx, $(&$ident,)*) -> Out + Copy + 'static,
+            ComponentOutput: From<Out>,
+            Out: 'static,
         {
             fn e(&self, props: ($($ident,)*)) -> Element {
                 Element(ElementInner::Component(ComponentTemplate {
                     // Why must I have such horrible double-boxing :(
-                    f: Box::new(Box::new(*self) as Box<dyn ComponentFunc<($($ident,)*)>>),
+                    f: Box::new(Box::new(*self) as Box<dyn ComponentFunc<($($ident,)*), Out>>),
                     props: Box::new(props),
                 }))
             }
 
-            fn call(&self, ($($ident,)*): &($($ident,)*), ctx: Fctx) -> Vec<Element> {
-                self(ctx, $($ident,)*)
+            fn call(&self, ($($ident,)*): &($($ident,)*), ctx: Fctx) -> ComponentOutput {
+                ComponentOutput::from(self(ctx, $($ident,)*))
             }
 
             fn fn_type_id(&self) -> TypeId {
                 std::any::TypeId::of::<Func>()
             }
 
-            fn dyn_clone(&self) -> Box<dyn ComponentFunc<($($ident,)*)>> {
+            fn dyn_clone(&self) -> Box<dyn ComponentFunc<($($ident,)*), Out>> {
                 Box::new(*self)
             }
         }
@@ -396,8 +398,8 @@ impl_functions!(A, B, C, D, E, F, G, H, I, J);
 impl_functions!(A, B, C, D, E, F, G, H, I, J, K);
 impl_functions!(A, B, C, D, E, F, G, H, I, J, K, L);
 
-impl<P: Any> DynComponentFunc for Box<dyn ComponentFunc<P>> {
-    fn call(&self, p: &dyn Prop, ctx: Fctx) -> Vec<Element> {
+impl<P: Any, M: 'static> DynComponentFunc for Box<dyn ComponentFunc<P, M>> {
+    fn call(&self, p: &dyn Prop, ctx: Fctx) -> ComponentOutput {
         (&**self).call(p.as_any().downcast_ref().unwrap(), ctx)
     }
     fn fn_type_id(&self) -> TypeId {
@@ -409,14 +411,70 @@ impl<P: Any> DynComponentFunc for Box<dyn ComponentFunc<P>> {
     }
 }
 
-pub struct Panel;
-impl Panel {
-    pub const E: fn(Vec<Element>) -> Element =
-        |children: Vec<Element>| Element(ElementInner::Primitive(Primitive::Panel, children));
+pub enum ComponentOutput {
+    None,
+    Single(Element),
+    Multiple(Vec<Element>),
 }
 
-pub struct Text;
-impl Text {
-    pub const E: fn(String) -> Element =
-        |text: String| Element(ElementInner::Primitive(Primitive::Text(text), vec![]));
+impl IntoIterator for ComponentOutput {
+    type Item = Element;
+
+    type IntoIter = ComponentOutputIterator;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            ComponentOutput::None => ComponentOutputIterator::OptionIterator(None.into_iter()),
+            ComponentOutput::Single(s) => {
+                ComponentOutputIterator::OptionIterator(Some(s).into_iter())
+            }
+            ComponentOutput::Multiple(v) => {
+                ComponentOutputIterator::MultipleIterator(v.into_iter())
+            }
+        }
+    }
+}
+
+pub enum ComponentOutputIterator {
+    OptionIterator(<Option<Element> as IntoIterator>::IntoIter),
+    MultipleIterator(<Vec<Element> as IntoIterator>::IntoIter),
+}
+
+impl Iterator for ComponentOutputIterator {
+    type Item = Element;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            ComponentOutputIterator::OptionIterator(v) => v.next(),
+            ComponentOutputIterator::MultipleIterator(v) => v.next(),
+        }
+    }
+}
+
+impl From<Element> for ComponentOutput {
+    fn from(v: Element) -> Self {
+        Self::Single(v)
+    }
+}
+
+impl From<Vec<Element>> for ComponentOutput {
+    fn from(v: Vec<Element>) -> Self {
+        Self::Multiple(v)
+    }
+}
+
+impl From<Option<Element>> for ComponentOutput {
+    fn from(v: Option<Element>) -> Self {
+        v.map(|v| Self::Single(v)).unwrap_or(ComponentOutput::None)
+    }
+}
+pub fn panel(children: impl Into<Vec<Element>>) -> Element {
+    Element(ElementInner::Primitive(Primitive::Panel, children.into()))
+}
+
+pub fn text(text: impl Into<String>) -> Element {
+    Element(ElementInner::Primitive(
+        Primitive::Text(text.into()),
+        vec![],
+    ))
 }

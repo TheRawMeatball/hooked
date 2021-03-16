@@ -2,3 +2,4 @@
 - Remove dirty flagging
 - Fine-tune primitive children situation
 - Bevy integration
+- Primitives with event hooks
