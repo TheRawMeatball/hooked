@@ -1,5 +1,6 @@
 - Flatten hierarchy
 - Remove dirty flagging
-- Fine-tune primitive children situation
+- Make DOM a concrete type
 - Bevy integration
+- Layout primitive type
 - Primitives with event hooks
