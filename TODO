@@ -1,0 +1,4 @@
+- Flatten hierarchy
+- Remove dirty flagging
+- Fine-tune primitive children situation
+- Bevy integration
