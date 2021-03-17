@@ -28,6 +28,9 @@ pub(crate) struct MountedId(pub u64);
 
 pub trait ComponentFunc<P, M>: 'static {
     fn e(&self, p: P) -> Element;
+    fn memo_e(&self, p: P) -> Element
+    where
+        P: PartialEq;
     fn call(&self, p: &P, ctx: Fctx) -> ComponentOutput;
     fn fn_type_id(&self) -> TypeId;
     fn dyn_clone(&self) -> Box<dyn ComponentFunc<P, M>>;
@@ -37,6 +40,7 @@ trait DynComponentFunc {
     fn call(&self, p: &dyn Prop, ctx: Fctx) -> ComponentOutput;
     fn fn_type_id(&self) -> TypeId;
     fn dyn_clone(&self) -> Box<dyn DynComponentFunc>;
+    fn use_memoized(&self, old: &dyn Prop, new: &dyn Prop) -> bool;
 }
 
 pub(crate) struct Effect {
@@ -137,7 +141,7 @@ impl Context {
             for resolver in self.rx.try_iter() {
                 // TODO: cull unnecessary effects
                 // TODO: start rerenders from the leaves
-                let component = &mut self.components.get(resolver.target_component);
+                let component = self.components.get(resolver.target_component);
                 let rc = &mut component.state[resolver.target_state as usize];
                 let state = Rc::get_mut(rc).unwrap();
                 (resolver.f)(state);
@@ -250,6 +254,10 @@ impl Context {
             (Mounted::Component(id), ElementInner::Component(new)) => {
                 if self.components.get(id).f.fn_type_id() == new.f.fn_type_id() {
                     let mut old = self.components.take(id);
+                    if old.f.use_memoized(&*old.props, &*new.props) {
+                        self.components.insert(id, old);
+                        return;
+                    }
                     let new_children = old.f.call(
                         &*new.props,
                         Fctx::update(
@@ -391,6 +399,19 @@ macro_rules! impl_functions {
             fn dyn_clone(&self) -> Box<dyn ComponentFunc<($($ident,)*), Out>> {
                 Box::new(*self)
             }
+
+            fn memo_e(&self, props: ($($ident,)*)) -> Element
+            where
+                ($($ident,)*): PartialEq
+            {
+                Element(ElementInner::Component(ComponentTemplate {
+                    // Why must I have such horrible double-boxing :(
+                    f: Box::new(MemoizableComponentFunc(
+                        Box::new(*self) as Box<dyn ComponentFunc<($($ident,)*), Out>>
+                    )),
+                    props: Box::new(props),
+                }))
+            }
         }
     };
 }
@@ -419,6 +440,33 @@ impl<P: Any, M: 'static> DynComponentFunc for Box<dyn ComponentFunc<P, M>> {
 
     fn dyn_clone(&self) -> Box<dyn DynComponentFunc> {
         Box::new((&**self).dyn_clone())
+    }
+
+    fn use_memoized(&self, _: &dyn Prop, _: &dyn Prop) -> bool {
+        false
+    }
+}
+
+struct MemoizableComponentFunc<P: PartialEq + Any, M>(Box<dyn ComponentFunc<P, M>>);
+
+impl<P: PartialEq + Any, M: 'static> DynComponentFunc for MemoizableComponentFunc<P, M> {
+    fn call(&self, p: &dyn Prop, ctx: Fctx) -> ComponentOutput {
+        (&*self.0).call(p.as_any().downcast_ref().unwrap(), ctx)
+    }
+    fn fn_type_id(&self) -> TypeId {
+        (&*self.0).fn_type_id()
+    }
+
+    fn dyn_clone(&self) -> Box<dyn DynComponentFunc> {
+        Box::new((&*self.0).dyn_clone())
+    }
+
+    fn use_memoized(&self, old: &dyn Prop, new: &dyn Prop) -> bool {
+        old.as_any()
+            .downcast_ref::<P>()
+            .zip(new.as_any().downcast_ref::<P>())
+            .map(|(a, b)| a == b)
+            .unwrap_or(false)
     }
 }
 
