@@ -6,11 +6,11 @@ use std::{
     rc::Rc,
 };
 
-use crate::internal::{ComponentId, Effect, EffectResolver, EffectStage, Tx};
+use crate::internal::{Effect, EffectResolver, EffectStage, MountedId, Tx};
 
 pub struct Fctx<'a> {
     tx: Tx,
-    id: ComponentId,
+    id: MountedId,
     states: RefCell<&'a mut Vec<Rc<dyn Any>>>,
     memos: RefCell<&'a mut Vec<Rc<RefCell<Memo>>>>,
     effects: RefCell<&'a mut Vec<Effect>>,
@@ -24,7 +24,7 @@ impl<'a> Fctx<'a> {
     // Internal stuff
     pub(crate) fn render_first(
         tx: Tx,
-        id: ComponentId,
+        id: MountedId,
         states: &'a mut Vec<Rc<dyn Any>>,
         memos: &'a mut Vec<Rc<RefCell<Memo>>>,
         effects: &'a mut Vec<Effect>,
@@ -44,7 +44,7 @@ impl<'a> Fctx<'a> {
 
     pub(crate) fn update(
         tx: Tx,
-        id: ComponentId,
+        id: MountedId,
         states: &'a mut Vec<Rc<dyn Any>>,
         memos: &'a mut Vec<Rc<RefCell<Memo>>>,
         effects: &'a mut Vec<Effect>,
@@ -82,7 +82,7 @@ impl<'a> Fctx<'a> {
             state,
             Setter {
                 tx: self.tx.clone(),
-                component: self.id,
+                target: self.id,
                 state: self.states_selector.get() - 1,
                 _m: PhantomData,
             },
@@ -195,14 +195,14 @@ pub(crate) struct Memo {
 
 pub struct Setter<T> {
     tx: Tx,
-    component: ComponentId,
+    target: MountedId,
     state: usize,
     _m: PhantomData<fn() -> T>,
 }
 
 impl<T: 'static> Setter<T> {
     pub fn set<F: FnOnce(&mut T) + Send + Sync + 'static>(&self, f: F) {
-        let id = self.component;
+        let id = self.target;
         let state = self.state;
         self.tx
             .send(EffectResolver {

@@ -1,4 +1,3 @@
-mod components;
 mod dom;
 mod fctx;
 mod internal;
