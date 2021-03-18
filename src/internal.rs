@@ -1,7 +1,7 @@
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::Hash,
     rc::Rc,
 };
@@ -24,6 +24,9 @@ pub(crate) struct EffectResolver {
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub(crate) struct MountedId(pub u64);
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct MountedRootId(MountedId);
 
 pub trait ComponentFunc<P, M>: 'static {
     fn e(&self, p: P) -> Element;
@@ -58,7 +61,50 @@ pub(crate) struct Component {
     state: Vec<Rc<dyn Any>>,
     memos: Vec<Rc<RefCell<Memo>>>,
     effects: Vec<Effect>,
-    dirty: bool,
+}
+
+impl Component {
+    fn update(
+        &mut self,
+        id: MountedId,
+        children: &mut Vec<MountedId>,
+        ctx: &mut Context,
+        dom: &mut impl Dom,
+    ) {
+        let new_children = self.f.call(
+            &*self.props,
+            Fctx::update(
+                ctx.tx.clone(),
+                id,
+                &mut self.state,
+                &mut self.memos,
+                &mut self.effects,
+            ),
+        );
+        let mut new_children = new_children.into_iter();
+        let mut remove_index = -1;
+        for child in children.iter_mut() {
+            if let Some(new_child) = new_children.next() {
+                ctx.diff(child, new_child, dom);
+                remove_index += 1;
+            }
+        }
+        for child in children.drain((remove_index + 1) as usize..) {
+            ctx.unmount(child, dom);
+        }
+        for remaining in new_children {
+            children.push(ctx.mount(remaining, dom));
+        }
+        for effect in self.effects.iter_mut() {
+            replace_with::replace_with_or_abort(effect, |effect| match effect.f {
+                EffectStage::Effect(e) => Effect {
+                    eq_cache: effect.eq_cache,
+                    f: EffectStage::Destructor(e()),
+                },
+                EffectStage::Destructor(_) => effect,
+            });
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -101,7 +147,13 @@ enum ElementInner {
 }
 
 #[derive(Clone)]
-pub struct Element(ElementInner);
+pub struct Element(ElementInner, Option<u64>);
+
+impl Element {
+    pub fn with_key(self, key: u64) -> Self {
+        Self(self.0, Some(key))
+    }
+}
 
 enum Mounted {
     Primitive(PrimitiveId),
@@ -118,7 +170,6 @@ impl Mounted {
 }
 
 pub struct Context {
-    root: MountedId,
     tree: HashMap<MountedId, (Mounted, Vec<MountedId>)>,
     counter: u64,
     tx: Tx,
@@ -126,28 +177,28 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(element: Element, dom: &mut impl Dom) -> Self {
+    pub fn new() -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         let tree = HashMap::new();
-        let mut ctx = Self {
-            root: MountedId(0),
+        Self {
             tree,
             tx,
             rx,
             counter: 0,
-        };
-        ctx.root = ctx.mount(element, dom);
-        ctx
+        }
+    }
+    pub fn mount_root(&mut self, e: Element, dom: &mut impl Dom) -> MountedRootId {
+        MountedRootId(self.mount(e, dom))
+    }
+    pub fn unmount_root(&mut self, id: MountedRootId, dom: &mut impl Dom) {
+        self.unmount(id.0, dom);
     }
     pub fn process_messages(&mut self, dom: &mut impl Dom) {
         dom.start();
+        let mut roots = HashSet::new();
+        let mut flagged = HashSet::new();
         while !self.rx.is_empty() {
-            //let mut change_roots = HashSet::new();
-            //let flagged = HashSet::new();
-
             for resolver in self.rx.try_iter() {
-                // TODO: cull unnecessary effects
-                // TODO: start rerenders from the leaves
                 let component = self
                     .tree
                     .get_mut(&resolver.target_component)
@@ -158,25 +209,37 @@ impl Context {
                 let rc = &mut component.state[resolver.target_state as usize];
                 let state = Rc::get_mut(rc).unwrap();
                 (resolver.f)(state);
-                component.dirty = true;
 
-                // let cid = resolver.target_component;
-                // if flagged.contains(&cid) {
-                //     continue;
-                // }
+                let id = resolver.target_component;
+                if flagged.contains(&id) {
+                    continue;
+                }
 
-                // fn recursive(val: ComponentId, flagged: &mut HashSet<ComponentId>, change_roots: &mut HashSet<ComponentId>, tree: ) {
-                //     if change_roots.remove(&val) {
-                //         return;
-                //     }
-                //     flagged.insert(val);
-                // }
+                fn recursive(
+                    element: MountedId,
+                    roots: &mut HashSet<MountedId>,
+                    flagged: &mut HashSet<MountedId>,
+                    tree: &HashMap<MountedId, (Mounted, Vec<MountedId>)>,
+                ) {
+                    for cid in tree.get(&element).unwrap().1.iter() {
+                        roots.remove(cid);
+                        if !flagged.insert(*cid) {
+                            continue;
+                        }
+                        recursive(*cid, roots, flagged, tree);
+                    }
+                }
 
-                // change_roots.insert(cid);
+                roots.insert(id);
+                recursive(id, &mut roots, &mut flagged, &self.tree);
             }
-            let mut root = self.root;
-            self.rerender_flagged(&mut root, dom);
-            self.root = root;
+            flagged.clear();
+            for rerender_root in roots.drain() {
+                let (mut this, mut children) = self.tree.remove(&rerender_root).unwrap();
+                let c = this.as_component().unwrap();
+                c.update(rerender_root, &mut children, self, dom);
+                self.tree.insert(rerender_root, (this, children));
+            }
         }
         dom.commit();
     }
@@ -233,7 +296,6 @@ impl Context {
                     state,
                     memos,
                     effects,
-                    dirty: false,
                 };
                 self.tree
                     .insert(mounted_id, (Mounted::Component(component), children));
@@ -283,42 +345,8 @@ impl Context {
             }
             (Mounted::Component(mut old), ElementInner::Component(new)) => {
                 if old.f.fn_type_id() == new.f.fn_type_id() {
-                    if old.f.use_memoized(&*old.props, &*new.props) {
-                        self.tree.insert(*id, (Mounted::Component(old), children));
-                        return;
-                    }
-                    let new_children = old.f.call(
-                        &*new.props,
-                        Fctx::update(
-                            self.tx.clone(),
-                            *id,
-                            &mut old.state,
-                            &mut old.memos,
-                            &mut old.effects,
-                        ),
-                    );
-                    let mut new_children = new_children.into_iter();
-                    let mut remove_index = -1i32;
-                    for child in children.iter_mut() {
-                        if let Some(new_child) = new_children.next() {
-                            self.diff(child, new_child, dom);
-                            remove_index += 1;
-                        }
-                    }
-                    for child in children.drain((remove_index + 1) as usize..) {
-                        self.unmount(child, dom);
-                    }
-                    for remaining in new_children {
-                        children.push(self.mount(remaining, dom));
-                    }
-                    for effect in old.effects.iter_mut() {
-                        replace_with::replace_with_or_abort(effect, |effect| match effect.f {
-                            EffectStage::Effect(e) => Effect {
-                                eq_cache: effect.eq_cache,
-                                f: EffectStage::Destructor(e()),
-                            },
-                            EffectStage::Destructor(_) => effect,
-                        });
+                    if !old.f.use_memoized(&*old.props, &*new.props) {
+                        old.update(*id, &mut children, self, dom);
                     }
                     self.tree.insert(*id, (Mounted::Component(old), children));
                 } else {
@@ -327,72 +355,15 @@ impl Context {
                     }
                     self.tree.insert(*id, (Mounted::Component(old), children));
                     self.unmount(*id, dom);
-                    *id = self.mount(Element(ElementInner::Component(new)), dom);
+                    *id = self.mount(Element(ElementInner::Component(new), other.1), dom);
                 }
             }
             (this, new) => {
                 self.tree.insert(*id, (this, children));
                 self.unmount(*id, dom);
-                *id = self.mount(Element(new), dom);
+                *id = self.mount(Element(new, other.1), dom);
             }
         }
-    }
-
-    fn rerender_flagged(&mut self, this_id: &mut MountedId, dom: &mut impl Dom) {
-        let (mut this, mut children) = self.tree.remove(&this_id).unwrap();
-        match &mut this {
-            Mounted::Component(ref mut c) => {
-                let mut updated_children = false;
-                if c.dirty {
-                    updated_children = true;
-                    let new_children = c.f.call(
-                        &*c.props,
-                        Fctx::update(
-                            self.tx.clone(),
-                            *this_id,
-                            &mut c.state,
-                            &mut c.memos,
-                            &mut c.effects,
-                        ),
-                    );
-                    let mut new_children = new_children.into_iter();
-                    let mut remove_index = -1isize;
-                    for child in children.iter_mut() {
-                        if let Some(new_child) = new_children.next() {
-                            self.diff(child, new_child, dom);
-                            remove_index += 1;
-                        }
-                    }
-                    for child in children.drain((remove_index + 1) as usize..) {
-                        self.unmount(child, dom);
-                    }
-                    for remaining in new_children {
-                        children.push(self.mount(remaining, dom));
-                    }
-                    for effect in c.effects.iter_mut() {
-                        replace_with::replace_with_or_abort(effect, |effect| match effect.f {
-                            EffectStage::Effect(e) => Effect {
-                                eq_cache: effect.eq_cache,
-                                f: EffectStage::Destructor(e()),
-                            },
-                            EffectStage::Destructor(_) => effect,
-                        });
-                    }
-                }
-                if !updated_children {
-                    for child in children.iter_mut() {
-                        self.rerender_flagged(child, dom);
-                    }
-                }
-            }
-            Mounted::Primitive(id) => {
-                for child in children.iter_mut() {
-                    let mut dom = dom.get_sub_context(*id);
-                    self.rerender_flagged(child, &mut dom);
-                }
-            }
-        }
-        self.tree.insert(*this_id, (this, children));
     }
 }
 
@@ -411,7 +382,7 @@ macro_rules! impl_functions {
                     // Why must I have such horrible double-boxing :(
                     f: Box::new(Box::new(*self) as Box<dyn ComponentFunc<($($ident,)*), Out>>),
                     props: Box::new(props),
-                }))
+                }), None)
             }
 
             fn call(&self, ($($ident,)*): &($($ident,)*), ctx: Fctx) -> ComponentOutput {
@@ -436,7 +407,7 @@ macro_rules! impl_functions {
                         Box::new(*self) as Box<dyn ComponentFunc<($($ident,)*), Out>>
                     )),
                     props: Box::new(props),
-                }))
+                }), None)
             }
         }
     };
@@ -554,12 +525,15 @@ impl From<Option<Element>> for ComponentOutput {
     }
 }
 pub fn panel(children: impl Into<Vec<Element>>) -> Element {
-    Element(ElementInner::Primitive(Primitive::Panel, children.into()))
+    Element(
+        ElementInner::Primitive(Primitive::Panel, children.into()),
+        None,
+    )
 }
 
 pub fn text(text: impl Into<String>) -> Element {
-    Element(ElementInner::Primitive(
-        Primitive::Text(text.into()),
-        vec![],
-    ))
+    Element(
+        ElementInner::Primitive(Primitive::Text(text.into()), vec![]),
+        None,
+    )
 }

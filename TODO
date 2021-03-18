@@ -1,5 +1,4 @@
 - Add element keys
-- Remove dirty flagging
 - Make DOM a concrete type
 - Bevy integration
 - Layout primitive type
