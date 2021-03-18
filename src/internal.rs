@@ -155,22 +155,27 @@ impl Element {
     }
 }
 
-enum Mounted {
+struct Mounted {
+    inner: MountedInner,
+    children: Vec<MountedId>,
+}
+
+enum MountedInner {
     Primitive(PrimitiveId),
     Component(Component),
 }
 
-impl Mounted {
+impl MountedInner {
     fn as_component(&mut self) -> Option<&mut Component> {
         match self {
-            Mounted::Primitive(_) => None,
-            Mounted::Component(c) => Some(c),
+            MountedInner::Primitive(_) => None,
+            MountedInner::Component(c) => Some(c),
         }
     }
 }
 
 pub struct Context {
-    tree: HashMap<MountedId, (Mounted, Vec<MountedId>)>,
+    tree: HashMap<MountedId, Mounted>,
     counter: u64,
     tx: Tx,
     rx: Rx,
@@ -203,7 +208,7 @@ impl Context {
                     .tree
                     .get_mut(&resolver.target_component)
                     .unwrap()
-                    .0
+                    .inner
                     .as_component()
                     .unwrap();
                 let rc = &mut component.state[resolver.target_state as usize];
@@ -219,9 +224,9 @@ impl Context {
                     element: MountedId,
                     roots: &mut HashSet<MountedId>,
                     flagged: &mut HashSet<MountedId>,
-                    tree: &HashMap<MountedId, (Mounted, Vec<MountedId>)>,
+                    tree: &HashMap<MountedId, Mounted>,
                 ) {
-                    for cid in tree.get(&element).unwrap().1.iter() {
+                    for cid in tree.get(&element).unwrap().children.iter() {
                         roots.remove(cid);
                         if !flagged.insert(*cid) {
                             continue;
@@ -235,10 +240,13 @@ impl Context {
             }
             flagged.clear();
             for rerender_root in roots.drain() {
-                let (mut this, mut children) = self.tree.remove(&rerender_root).unwrap();
-                let c = this.as_component().unwrap();
+                let Mounted {
+                    mut inner,
+                    mut children,
+                } = self.tree.remove(&rerender_root).unwrap();
+                let c = inner.as_component().unwrap();
                 c.update(rerender_root, &mut children, self, dom);
-                self.tree.insert(rerender_root, (this, children));
+                self.tree.insert(rerender_root, Mounted { inner, children });
             }
         }
         dom.commit();
@@ -259,8 +267,13 @@ impl Context {
                     .collect();
                 let mounted_id = MountedId(self.counter);
                 self.counter += 1;
-                self.tree
-                    .insert(mounted_id, (Mounted::Primitive(id), children));
+                self.tree.insert(
+                    mounted_id,
+                    Mounted {
+                        inner: MountedInner::Primitive(id),
+                        children,
+                    },
+                );
                 mounted_id
             }
             ElementInner::Component(c) => {
@@ -297,23 +310,28 @@ impl Context {
                     memos,
                     effects,
                 };
-                self.tree
-                    .insert(mounted_id, (Mounted::Component(component), children));
+                self.tree.insert(
+                    mounted_id,
+                    Mounted {
+                        inner: MountedInner::Component(component),
+                        children,
+                    },
+                );
                 mounted_id
             }
         }
     }
 
     fn unmount(&mut self, this: MountedId, dom: &mut impl Dom) {
-        let (this, children) = self.tree.remove(&this).unwrap();
+        let Mounted { inner, children } = self.tree.remove(&this).unwrap();
         for child in children {
             self.unmount(child, dom);
         }
-        match this {
-            Mounted::Primitive(id) => {
+        match inner {
+            MountedInner::Primitive(id) => {
                 dom.remove(id);
             }
-            Mounted::Component(c) => {
+            MountedInner::Component(c) => {
                 for effect in c.effects.into_iter() {
                     match effect.f {
                         EffectStage::Destructor(d) => d(),
@@ -325,9 +343,12 @@ impl Context {
     }
 
     fn diff(&mut self, id: &mut MountedId, other: Element, dom: &mut impl Dom) {
-        let (this, mut children) = self.tree.remove(&id).unwrap();
-        match (this, other.0) {
-            (Mounted::Primitive(p_id), ElementInner::Primitive(new, new_children)) => {
+        let Mounted {
+            inner,
+            mut children,
+        } = self.tree.remove(&id).unwrap();
+        match (inner, other.0) {
+            (MountedInner::Primitive(p_id), ElementInner::Primitive(new, new_children)) => {
                 dom.diff_primitive(p_id, new);
                 let mut dom = dom.get_sub_context(p_id);
                 let mut new_children = new_children.into_iter();
@@ -341,25 +362,43 @@ impl Context {
                 for remaining in new_children {
                     children.push(self.mount(remaining, &mut dom));
                 }
-                self.tree.insert(*id, (Mounted::Primitive(p_id), children));
+                self.tree.insert(
+                    *id,
+                    Mounted {
+                        inner: MountedInner::Primitive(p_id),
+                        children,
+                    },
+                );
             }
-            (Mounted::Component(mut old), ElementInner::Component(new)) => {
+            (MountedInner::Component(mut old), ElementInner::Component(new)) => {
                 if old.f.fn_type_id() == new.f.fn_type_id() {
                     if !old.f.use_memoized(&*old.props, &*new.props) {
                         old.update(*id, &mut children, self, dom);
                     }
-                    self.tree.insert(*id, (Mounted::Component(old), children));
+                    self.tree.insert(
+                        *id,
+                        Mounted {
+                            inner: MountedInner::Component(old),
+                            children,
+                        },
+                    );
                 } else {
                     for child in children.drain(..) {
                         self.unmount(child, dom);
                     }
-                    self.tree.insert(*id, (Mounted::Component(old), children));
+                    self.tree.insert(
+                        *id,
+                        Mounted {
+                            inner: MountedInner::Component(old),
+                            children,
+                        },
+                    );
                     self.unmount(*id, dom);
                     *id = self.mount(Element(ElementInner::Component(new), other.1), dom);
                 }
             }
-            (this, new) => {
-                self.tree.insert(*id, (this, children));
+            (inner, new) => {
+                self.tree.insert(*id, Mounted { inner, children });
                 self.unmount(*id, dom);
                 *id = self.mount(Element(new, other.1), dom);
             }
