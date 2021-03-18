@@ -410,6 +410,21 @@ macro_rules! impl_functions {
                 }), None)
             }
         }
+
+        #[allow(non_snake_case)]
+        impl<Func: Fn($($ident,)*) -> Element + 'static, $($ident,)*> ComponentFunc<($($ident,)*), ()> for Func {
+            fn e(&self, ($($ident,)*): ($($ident,)*)) -> Element {
+                self($($ident,)*)
+            }
+            fn memo_e(&self, ($($ident,)*): ($($ident,)*)) -> Element
+            where
+                ($($ident,)*): PartialEq {
+                self($($ident,)*)
+            }
+            fn call(&self, _: &($($ident,)*), _: Fctx) -> ComponentOutput { unreachable!() }
+            fn fn_type_id(&self) -> TypeId { unreachable!() }
+            fn dyn_clone(&self) -> Box<dyn ComponentFunc<($($ident,)*), ()>> { unreachable!() }
+        }
     };
 }
 

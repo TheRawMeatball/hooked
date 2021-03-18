@@ -86,7 +86,7 @@ fn demo() {
     let mut dom = DemoDom::default();
 
     let mut context = Context::new();
-    context.mount_root(app(), &mut dom);
+    context.mount_root(app.e(()), &mut dom);
     loop {
         if context.msg_count() > 0 {
             context.process_messages(&mut dom);
