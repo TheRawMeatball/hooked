@@ -27,6 +27,8 @@ pub(crate) struct MountedId(pub u64);
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct MountedRootId(MountedId);
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct Key(pub u64);
 
 pub trait ComponentFunc<P, M>: 'static {
     fn e(&self, p: P) -> Element;
@@ -93,7 +95,7 @@ impl Component {
             ctx.unmount(child, dom);
         }
         for remaining in new_children {
-            children.push(ctx.mount(remaining, dom));
+            children.push(ctx.mount(remaining.0, dom));
         }
         for effect in self.effects.iter_mut() {
             replace_with::replace_with_or_abort(effect, |effect| match effect.f {
@@ -147,10 +149,10 @@ enum ElementInner {
 }
 
 #[derive(Clone)]
-pub struct Element(ElementInner, Option<u64>);
+pub struct Element(ElementInner, Option<Key>);
 
 impl Element {
-    pub fn with_key(self, key: u64) -> Self {
+    pub fn with_key(self, key: Key) -> Self {
         Self(self.0, Some(key))
     }
 }
@@ -193,7 +195,7 @@ impl Context {
         }
     }
     pub fn mount_root(&mut self, e: Element, dom: &mut impl Dom) -> MountedRootId {
-        MountedRootId(self.mount(e, dom))
+        MountedRootId(self.mount(e.0, dom))
     }
     pub fn unmount_root(&mut self, id: MountedRootId, dom: &mut impl Dom) {
         self.unmount(id.0, dom);
@@ -256,14 +258,14 @@ impl Context {
         self.rx.len()
     }
 
-    fn mount(&mut self, element: Element, dom: &mut impl Dom) -> MountedId {
-        match element.0 {
+    fn mount(&mut self, element: ElementInner, dom: &mut impl Dom) -> MountedId {
+        match element {
             ElementInner::Primitive(p, c) => {
                 let id = dom.mount(p);
                 let mut child_ctx = dom.get_sub_context(id);
                 let children = c
                     .into_iter()
-                    .map(|v| self.mount(v, &mut child_ctx))
+                    .map(|v| self.mount(v.0, &mut child_ctx))
                     .collect();
                 let mounted_id = MountedId(self.counter);
                 self.counter += 1;
@@ -292,7 +294,7 @@ impl Context {
                         &mut effects,
                     ),
                 );
-                let children = ro.into_iter().map(|e| self.mount(e, dom)).collect();
+                let children = ro.into_iter().map(|e| self.mount(e.0, dom)).collect();
                 for effect in effects.iter_mut() {
                     replace_with::replace_with_or_abort(effect, |effect| match effect.f {
                         EffectStage::Effect(e) => Effect {
@@ -360,7 +362,7 @@ impl Context {
                     }
                 }
                 for remaining in new_children {
-                    children.push(self.mount(remaining, &mut dom));
+                    children.push(self.mount(remaining.0, &mut dom));
                 }
                 self.tree.insert(
                     *id,
@@ -394,13 +396,13 @@ impl Context {
                         },
                     );
                     self.unmount(*id, dom);
-                    *id = self.mount(Element(ElementInner::Component(new), other.1), dom);
+                    *id = self.mount(ElementInner::Component(new), dom);
                 }
             }
             (inner, new) => {
                 self.tree.insert(*id, Mounted { inner, children });
                 self.unmount(*id, dom);
-                *id = self.mount(Element(new, other.1), dom);
+                *id = self.mount(new, dom);
             }
         }
     }
