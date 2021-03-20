@@ -72,6 +72,7 @@ impl Component {
         children: &mut Children,
         ctx: &mut Context,
         dom: &mut impl Dom,
+        parent: Option<PrimitiveId>,
     ) {
         let new_children = self.f.call(
             &*self.props,
@@ -83,7 +84,7 @@ impl Component {
                 &mut self.effects,
             ),
         );
-        ctx.diff_children(children, new_children, dom);
+        ctx.diff_children(children, new_children, dom, parent);
     }
 }
 
@@ -138,6 +139,7 @@ impl Element {
 struct Mounted {
     inner: MountedInner,
     children: Children,
+    parent: Option<PrimitiveId>,
 }
 
 struct Children {
@@ -191,7 +193,7 @@ impl Context {
         }
     }
     pub fn mount_root(&mut self, e: Element, dom: &mut impl Dom) -> MountedRootId {
-        MountedRootId(self.mount(e.0, dom))
+        MountedRootId(self.mount(e.0, dom, None))
     }
     pub fn unmount_root(&mut self, id: MountedRootId, dom: &mut impl Dom) {
         self.unmount(id.0, dom);
@@ -241,10 +243,23 @@ impl Context {
                 let Mounted {
                     mut inner,
                     mut children,
+                    parent,
                 } = self.tree.remove(&rerender_root).unwrap();
                 let c = inner.as_component().unwrap();
-                c.update(rerender_root, &mut children, self, dom);
-                self.tree.insert(rerender_root, Mounted { inner, children });
+                if let Some(id) = parent {
+                    let mut dom = dom.get_sub_context(id);
+                    c.update(rerender_root, &mut children, self, &mut dom, parent);
+                } else {
+                    c.update(rerender_root, &mut children, self, dom, parent);
+                };
+                self.tree.insert(
+                    rerender_root,
+                    Mounted {
+                        inner,
+                        children,
+                        parent,
+                    },
+                );
             }
         }
         dom.commit();
@@ -254,7 +269,12 @@ impl Context {
         self.rx.len()
     }
 
-    fn mount(&mut self, element: ElementInner, dom: &mut impl Dom) -> MountedId {
+    fn mount(
+        &mut self,
+        element: ElementInner,
+        dom: &mut impl Dom,
+        parent: Option<PrimitiveId>,
+    ) -> MountedId {
         match element {
             ElementInner::Primitive(p, c) => {
                 let id = dom.mount(p);
@@ -263,9 +283,9 @@ impl Context {
                 let mut unkeyed = Vec::new();
                 for element in c.into_iter() {
                     if let Some(key) = element.1 {
-                        keyed.insert(key, self.mount(element.0, &mut child_ctx));
+                        keyed.insert(key, self.mount(element.0, &mut child_ctx, Some(id)));
                     } else {
-                        unkeyed.push(self.mount(element.0, &mut child_ctx));
+                        unkeyed.push(self.mount(element.0, &mut child_ctx, Some(id)));
                     }
                 }
                 let mounted_id = MountedId(self.counter);
@@ -275,6 +295,7 @@ impl Context {
                     Mounted {
                         inner: MountedInner::Primitive(id),
                         children: Children { keyed, unkeyed },
+                        parent: Some(id),
                     },
                 );
                 mounted_id
@@ -299,9 +320,9 @@ impl Context {
                 let mut unkeyed = Vec::new();
                 for element in children.into_iter() {
                     if let Some(key) = element.1 {
-                        keyed.insert(key, self.mount(element.0, dom));
+                        keyed.insert(key, self.mount(element.0, dom, parent));
                     } else {
-                        unkeyed.push(self.mount(element.0, dom));
+                        unkeyed.push(self.mount(element.0, dom, parent));
                     }
                 }
                 for effect in effects.iter_mut() {
@@ -326,6 +347,7 @@ impl Context {
                     Mounted {
                         inner: MountedInner::Component(component),
                         children: Children { keyed, unkeyed },
+                        parent,
                     },
                 );
                 mounted_id
@@ -334,7 +356,9 @@ impl Context {
     }
 
     fn unmount(&mut self, this: MountedId, dom: &mut impl Dom) {
-        let Mounted { inner, children } = self.tree.remove(&this).unwrap();
+        let Mounted {
+            inner, children, ..
+        } = self.tree.remove(&this).unwrap();
         for &child in &children {
             self.unmount(child, dom);
         }
@@ -357,6 +381,7 @@ impl Context {
         let Mounted {
             inner,
             mut children,
+            parent,
         } = self.tree.remove(&id).unwrap();
         match (inner, other.0) {
             (MountedInner::Primitive(p_id), ElementInner::Primitive(new, new_children)) => {
@@ -366,25 +391,28 @@ impl Context {
                     &mut children,
                     ComponentOutput::Multiple(new_children),
                     &mut dom,
+                    Some(p_id),
                 );
                 self.tree.insert(
                     *id,
                     Mounted {
                         inner: MountedInner::Primitive(p_id),
                         children,
+                        parent: Some(p_id),
                     },
                 );
             }
             (MountedInner::Component(mut old), ElementInner::Component(new)) => {
                 if old.f.fn_type_id() == new.f.fn_type_id() {
                     if !old.f.use_memoized(&*old.props, &*new.props) {
-                        old.update(*id, &mut children, self, dom);
+                        old.update(*id, &mut children, self, dom, parent);
                     }
                     self.tree.insert(
                         *id,
                         Mounted {
                             inner: MountedInner::Component(old),
                             children,
+                            parent,
                         },
                     );
                 } else {
@@ -396,21 +424,35 @@ impl Context {
                         Mounted {
                             inner: MountedInner::Component(old),
                             children,
+                            parent,
                         },
                     );
                     self.unmount(*id, dom);
-                    *id = self.mount(ElementInner::Component(new), dom);
+                    *id = self.mount(ElementInner::Component(new), dom, parent);
                 }
             }
             (inner, new) => {
-                self.tree.insert(*id, Mounted { inner, children });
+                self.tree.insert(
+                    *id,
+                    Mounted {
+                        inner,
+                        children,
+                        parent,
+                    },
+                );
                 self.unmount(*id, dom);
-                *id = self.mount(new, dom);
+                *id = self.mount(new, dom, parent);
             }
         }
     }
 
-    fn diff_children(&mut self, old: &mut Children, new: ComponentOutput, dom: &mut impl Dom) {
+    fn diff_children(
+        &mut self,
+        old: &mut Children,
+        new: ComponentOutput,
+        dom: &mut impl Dom,
+        parent: Option<PrimitiveId>,
+    ) {
         let mut unkeyed = Vec::new();
         let mut keyed = HashMap::new();
         for element in new {
@@ -419,14 +461,14 @@ impl Context {
                     self.diff(&mut old_id, element, dom);
                     keyed.insert(key, old_id);
                 } else {
-                    keyed.insert(key, self.mount(element.0, dom));
+                    keyed.insert(key, self.mount(element.0, dom, parent));
                 }
             } else {
                 if let Some(mut old_id) = old.unkeyed.pop() {
                     self.diff(&mut old_id, element, dom);
                     unkeyed.push(old_id);
                 } else {
-                    unkeyed.push(self.mount(element.0, dom));
+                    unkeyed.push(self.mount(element.0, dom, parent));
                 }
             }
         }
