@@ -9,6 +9,8 @@ pub struct PrimitiveId(pub u64);
 
 pub trait Dom {
     fn start(&mut self) {}
+    fn zero_cursor(&mut self);
+    fn increment_cursor(&mut self, amount: u32);
     fn mount(&mut self, primitive: Primitive) -> PrimitiveId {
         self.mount_as_child(primitive, None)
     }
@@ -22,6 +24,14 @@ pub trait Dom {
 impl<T: Dom + ?Sized> Dom for (PrimitiveId, &mut T) {
     fn mount(&mut self, primitive: Primitive) -> PrimitiveId {
         self.1.mount_as_child(primitive, Some(self.0))
+    }
+
+    fn zero_cursor(&mut self) {
+        self.1.zero_cursor();
+    }
+
+    fn increment_cursor(&mut self, amount: u32) {
+        self.1.increment_cursor(amount);
     }
 
     fn diff_primitive(&mut self, old: PrimitiveId, new: Primitive) {

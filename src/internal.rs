@@ -69,7 +69,7 @@ impl Component {
     fn update(
         &mut self,
         id: MountedId,
-        children: &mut Vec<MountedId>,
+        children: &mut Children,
         ctx: &mut Context,
         dom: &mut impl Dom,
     ) {
@@ -83,29 +83,7 @@ impl Component {
                 &mut self.effects,
             ),
         );
-        let mut new_children = new_children.into_iter();
-        let mut remove_index = -1;
-        for child in children.iter_mut() {
-            if let Some(new_child) = new_children.next() {
-                ctx.diff(child, new_child, dom);
-                remove_index += 1;
-            }
-        }
-        for child in children.drain((remove_index + 1) as usize..) {
-            ctx.unmount(child, dom);
-        }
-        for remaining in new_children {
-            children.push(ctx.mount(remaining.0, dom));
-        }
-        for effect in self.effects.iter_mut() {
-            replace_with::replace_with_or_abort(effect, |effect| match effect.f {
-                EffectStage::Effect(e) => Effect {
-                    eq_cache: effect.eq_cache,
-                    f: EffectStage::Destructor(e()),
-                },
-                EffectStage::Destructor(_) => effect,
-            });
-        }
+        ctx.diff_children(children, new_children, dom);
     }
 }
 
@@ -159,7 +137,25 @@ impl Element {
 
 struct Mounted {
     inner: MountedInner,
-    children: Vec<MountedId>,
+    children: Children,
+}
+
+struct Children {
+    unkeyed: Vec<MountedId>,
+    keyed: HashMap<Key, MountedId>,
+}
+
+impl<'a> IntoIterator for &'a Children {
+    type Item = &'a MountedId;
+
+    type IntoIter = std::iter::Chain<
+        core::slice::Iter<'a, MountedId>,
+        std::collections::hash_map::Values<'a, Key, MountedId>,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.unkeyed.iter().chain(self.keyed.values())
+    }
 }
 
 enum MountedInner {
@@ -228,7 +224,7 @@ impl Context {
                     flagged: &mut HashSet<MountedId>,
                     tree: &HashMap<MountedId, Mounted>,
                 ) {
-                    for cid in tree.get(&element).unwrap().children.iter() {
+                    for cid in &tree.get(&element).unwrap().children {
                         roots.remove(cid);
                         if !flagged.insert(*cid) {
                             continue;
@@ -263,17 +259,22 @@ impl Context {
             ElementInner::Primitive(p, c) => {
                 let id = dom.mount(p);
                 let mut child_ctx = dom.get_sub_context(id);
-                let children = c
-                    .into_iter()
-                    .map(|v| self.mount(v.0, &mut child_ctx))
-                    .collect();
+                let mut keyed = HashMap::new();
+                let mut unkeyed = Vec::new();
+                for element in c.into_iter() {
+                    if let Some(key) = element.1 {
+                        keyed.insert(key, self.mount(element.0, &mut child_ctx));
+                    } else {
+                        unkeyed.push(self.mount(element.0, &mut child_ctx));
+                    }
+                }
                 let mounted_id = MountedId(self.counter);
                 self.counter += 1;
                 self.tree.insert(
                     mounted_id,
                     Mounted {
                         inner: MountedInner::Primitive(id),
-                        children,
+                        children: Children { keyed, unkeyed },
                     },
                 );
                 mounted_id
@@ -284,7 +285,7 @@ impl Context {
                 let mut effects = Vec::new();
                 let mounted_id = MountedId(self.counter);
                 self.counter += 1;
-                let ro = c.f.call(
+                let children = c.f.call(
                     &*c.props,
                     Fctx::render_first(
                         self.tx.clone(),
@@ -294,7 +295,15 @@ impl Context {
                         &mut effects,
                     ),
                 );
-                let children = ro.into_iter().map(|e| self.mount(e.0, dom)).collect();
+                let mut keyed = HashMap::new();
+                let mut unkeyed = Vec::new();
+                for element in children.into_iter() {
+                    if let Some(key) = element.1 {
+                        keyed.insert(key, self.mount(element.0, dom));
+                    } else {
+                        unkeyed.push(self.mount(element.0, dom));
+                    }
+                }
                 for effect in effects.iter_mut() {
                     replace_with::replace_with_or_abort(effect, |effect| match effect.f {
                         EffectStage::Effect(e) => Effect {
@@ -316,7 +325,7 @@ impl Context {
                     mounted_id,
                     Mounted {
                         inner: MountedInner::Component(component),
-                        children,
+                        children: Children { keyed, unkeyed },
                     },
                 );
                 mounted_id
@@ -326,7 +335,7 @@ impl Context {
 
     fn unmount(&mut self, this: MountedId, dom: &mut impl Dom) {
         let Mounted { inner, children } = self.tree.remove(&this).unwrap();
-        for child in children {
+        for &child in &children {
             self.unmount(child, dom);
         }
         match inner {
@@ -353,17 +362,11 @@ impl Context {
             (MountedInner::Primitive(p_id), ElementInner::Primitive(new, new_children)) => {
                 dom.diff_primitive(p_id, new);
                 let mut dom = dom.get_sub_context(p_id);
-                let mut new_children = new_children.into_iter();
-                for child in children.iter_mut() {
-                    if let Some(new_child) = new_children.next() {
-                        self.diff(child, new_child, &mut dom);
-                    } else {
-                        self.unmount(*child, &mut dom);
-                    }
-                }
-                for remaining in new_children {
-                    children.push(self.mount(remaining.0, &mut dom));
-                }
+                self.diff_children(
+                    &mut children,
+                    ComponentOutput::Multiple(new_children),
+                    &mut dom,
+                );
                 self.tree.insert(
                     *id,
                     Mounted {
@@ -385,7 +388,7 @@ impl Context {
                         },
                     );
                 } else {
-                    for child in children.drain(..) {
+                    for child in children.unkeyed.drain(..) {
                         self.unmount(child, dom);
                     }
                     self.tree.insert(
@@ -404,6 +407,38 @@ impl Context {
                 self.unmount(*id, dom);
                 *id = self.mount(new, dom);
             }
+        }
+    }
+
+    fn diff_children(&mut self, old: &mut Children, new: ComponentOutput, dom: &mut impl Dom) {
+        let mut unkeyed = Vec::new();
+        let mut keyed = HashMap::new();
+        for element in new {
+            if let Some(key) = element.1 {
+                if let Some(mut old_id) = old.keyed.remove(&key) {
+                    self.diff(&mut old_id, element, dom);
+                    keyed.insert(key, old_id);
+                } else {
+                    keyed.insert(key, self.mount(element.0, dom));
+                }
+            } else {
+                if let Some(mut old_id) = old.unkeyed.pop() {
+                    self.diff(&mut old_id, element, dom);
+                    unkeyed.push(old_id);
+                } else {
+                    unkeyed.push(self.mount(element.0, dom));
+                }
+            }
+        }
+        for removed in std::mem::replace(&mut old.unkeyed, unkeyed)
+            .into_iter()
+            .chain(
+                std::mem::replace(&mut old.keyed, keyed)
+                    .into_iter()
+                    .map(|(_, v)| v),
+            )
+        {
+            self.unmount(removed, dom);
         }
     }
 }

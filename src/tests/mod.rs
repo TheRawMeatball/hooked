@@ -79,6 +79,14 @@ impl Dom for DemoDom {
     fn get_sub_context(&mut self, id: PrimitiveId) -> (PrimitiveId, &mut dyn Dom) {
         (id, self)
     }
+
+    fn zero_cursor(&mut self) {
+        todo!()
+    }
+
+    fn increment_cursor(&mut self, _amount: u32) {
+        todo!()
+    }
 }
 
 #[test]
@@ -87,6 +95,7 @@ fn demo() {
 
     let mut context = Context::new();
     context.mount_root(app.e(()), &mut dom);
+    println!("{}", &dom);
     loop {
         if context.msg_count() > 0 {
             context.process_messages(&mut dom);
@@ -96,5 +105,10 @@ fn demo() {
 }
 
 fn app() -> Element {
-    e::panel([counter.e(()), blinker.e((3,)), blinker.e((5,))])
+    e::panel([
+        full_blinker.e(()),
+        counter.e(()),
+        simple_blinker.e((3,)),
+        simple_blinker.e((5,)),
+    ])
 }
