@@ -1,5 +1,4 @@
-- Add element keys
-- Make DOM a concrete type
 - Bevy integration
+- Make DOM a concrete type
 - Layout primitive type
 - Primitives with event hooks

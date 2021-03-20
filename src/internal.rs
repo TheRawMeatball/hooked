@@ -139,7 +139,13 @@ impl Element {
 struct Mounted {
     inner: MountedInner,
     children: Children,
-    parent: Option<PrimitiveId>,
+    parent: Option<ParentPrimitiveData>,
+}
+
+#[derive(Clone, Copy)]
+struct ParentPrimitiveData {
+    id: PrimitiveId,
+    cursor: u32,
 }
 
 struct Children {
@@ -246,11 +252,14 @@ impl Context {
                     parent,
                 } = self.tree.remove(&rerender_root).unwrap();
                 let c = inner.as_component().unwrap();
-                if let Some(id) = parent {
-                    let mut dom = dom.get_sub_context(id);
-                    c.update(rerender_root, &mut children, self, &mut dom, parent);
+                if let Some(data) = &parent {
+                    let old_cursor = dom.get_cursor();
+                    let mut child_ctx = dom.get_sub_context(data.id);
+                    child_ctx.set_cursor(data.cursor);
+                    c.update(rerender_root, &mut children, self, &mut child_ctx, Some(data.id));
+                    dom.set_cursor(old_cursor);
                 } else {
-                    c.update(rerender_root, &mut children, self, dom, parent);
+                    c.update(rerender_root, &mut children, self, dom, None);
                 };
                 self.tree.insert(
                     rerender_root,
@@ -273,21 +282,27 @@ impl Context {
         &mut self,
         element: ElementInner,
         dom: &mut impl Dom,
-        parent: Option<PrimitiveId>,
+        parent: Option<ParentPrimitiveData>,
     ) -> MountedId {
         match element {
             ElementInner::Primitive(p, c) => {
                 let id = dom.mount(p);
+                let old_cursor = dom.get_cursor();
                 let mut child_ctx = dom.get_sub_context(id);
                 let mut keyed = HashMap::new();
                 let mut unkeyed = Vec::new();
                 for element in c.into_iter() {
+                    let data = ParentPrimitiveData {
+                        id,
+                        cursor: child_ctx.get_cursor(),
+                    };
                     if let Some(key) = element.1 {
-                        keyed.insert(key, self.mount(element.0, &mut child_ctx, Some(id)));
+                        keyed.insert(key, self.mount(element.0, &mut child_ctx, Some(data)));
                     } else {
-                        unkeyed.push(self.mount(element.0, &mut child_ctx, Some(id)));
+                        unkeyed.push(self.mount(element.0, &mut child_ctx, Some(data)));
                     }
                 }
+                dom.set_cursor(old_cursor);
                 let mounted_id = MountedId(self.counter);
                 self.counter += 1;
                 self.tree.insert(
@@ -295,7 +310,10 @@ impl Context {
                     Mounted {
                         inner: MountedInner::Primitive(id),
                         children: Children { keyed, unkeyed },
-                        parent: Some(id),
+                        parent: parent.map(|data| ParentPrimitiveData {
+                            id: data.id,
+                            cursor: dom.get_cursor(),
+                        }),
                     },
                 );
                 mounted_id
@@ -319,10 +337,15 @@ impl Context {
                 let mut keyed = HashMap::new();
                 let mut unkeyed = Vec::new();
                 for element in children.into_iter() {
+                    let data = parent.map(|data| ParentPrimitiveData {
+                        id: data.id,
+                        cursor: dom.get_cursor(),
+                    });
+                    let mount_id = self.mount(element.0, dom, data);
                     if let Some(key) = element.1 {
-                        keyed.insert(key, self.mount(element.0, dom, parent));
+                        keyed.insert(key, mount_id);
                     } else {
-                        unkeyed.push(self.mount(element.0, dom, parent));
+                        unkeyed.push(mount_id);
                     }
                 }
                 for effect in effects.iter_mut() {
@@ -386,26 +409,28 @@ impl Context {
         match (inner, other.0) {
             (MountedInner::Primitive(p_id), ElementInner::Primitive(new, new_children)) => {
                 dom.diff_primitive(p_id, new);
-                let mut dom = dom.get_sub_context(p_id);
+                let old_cursor = dom.get_cursor();
+                let mut child_ctx = dom.get_sub_context(p_id);
                 self.diff_children(
                     &mut children,
                     ComponentOutput::Multiple(new_children),
-                    &mut dom,
+                    &mut child_ctx,
                     Some(p_id),
                 );
+                dom.set_cursor(old_cursor);
                 self.tree.insert(
                     *id,
                     Mounted {
                         inner: MountedInner::Primitive(p_id),
                         children,
-                        parent: Some(p_id),
+                        parent,
                     },
                 );
             }
             (MountedInner::Component(mut old), ElementInner::Component(new)) => {
                 if old.f.fn_type_id() == new.f.fn_type_id() {
                     if !old.f.use_memoized(&*old.props, &*new.props) {
-                        old.update(*id, &mut children, self, dom, parent);
+                        old.update(*id, &mut children, self, dom, parent.map(|v| v.id));
                     }
                     self.tree.insert(
                         *id,
@@ -456,19 +481,23 @@ impl Context {
         let mut unkeyed = Vec::new();
         let mut keyed = HashMap::new();
         for element in new {
+            let data = parent.map(|id| ParentPrimitiveData {
+                id,
+                cursor: dom.get_cursor(),
+            });
             if let Some(key) = element.1 {
                 if let Some(mut old_id) = old.keyed.remove(&key) {
                     self.diff(&mut old_id, element, dom);
                     keyed.insert(key, old_id);
                 } else {
-                    keyed.insert(key, self.mount(element.0, dom, parent));
+                    keyed.insert(key, self.mount(element.0, dom, data));
                 }
             } else {
                 if let Some(mut old_id) = old.unkeyed.pop() {
                     self.diff(&mut old_id, element, dom);
                     unkeyed.push(old_id);
                 } else {
-                    unkeyed.push(self.mount(element.0, dom, parent));
+                    unkeyed.push(self.mount(element.0, dom, data));
                 }
             }
         }

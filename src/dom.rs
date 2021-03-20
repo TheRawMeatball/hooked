@@ -1,4 +1,4 @@
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Primitive {
     Panel,
     Text(String),
@@ -9,8 +9,8 @@ pub struct PrimitiveId(pub u64);
 
 pub trait Dom {
     fn start(&mut self) {}
-    fn zero_cursor(&mut self);
-    fn increment_cursor(&mut self, amount: u32);
+    fn set_cursor(&mut self, pos: u32);
+    fn get_cursor(&mut self) -> u32;
     fn mount(&mut self, primitive: Primitive) -> PrimitiveId {
         self.mount_as_child(primitive, None)
     }
@@ -26,12 +26,12 @@ impl<T: Dom + ?Sized> Dom for (PrimitiveId, &mut T) {
         self.1.mount_as_child(primitive, Some(self.0))
     }
 
-    fn zero_cursor(&mut self) {
-        self.1.zero_cursor();
+    fn set_cursor(&mut self, amount: u32) {
+        self.1.set_cursor(amount);
     }
 
-    fn increment_cursor(&mut self, amount: u32) {
-        self.1.increment_cursor(amount);
+    fn get_cursor(&mut self) -> u32 {
+        self.1.get_cursor()
     }
 
     fn diff_primitive(&mut self, old: PrimitiveId, new: Primitive) {
@@ -39,6 +39,7 @@ impl<T: Dom + ?Sized> Dom for (PrimitiveId, &mut T) {
     }
 
     fn get_sub_context(&mut self, id: PrimitiveId) -> (PrimitiveId, &mut dyn Dom) {
+        self.1.set_cursor(0);
         (id, self)
     }
 

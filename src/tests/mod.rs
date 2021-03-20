@@ -15,6 +15,7 @@ struct DemoDom {
     counter: u64,
     roots: Vec<PrimitiveId>,
     dom: HashMap<PrimitiveId, (Primitive, Vec<PrimitiveId>)>,
+    cursor: u32,
 }
 
 impl Display for DemoDom {
@@ -57,6 +58,7 @@ impl Display for DemoDom {
 
 impl Dom for DemoDom {
     fn diff_primitive(&mut self, old: PrimitiveId, new: Primitive) {
+        println!("diffing {:?}! cursor: {}", &new, self.cursor);
         self.dom.get_mut(&old).unwrap().0 = new;
     }
     fn remove(&mut self, id: PrimitiveId) {
@@ -65,27 +67,34 @@ impl Dom for DemoDom {
     }
 
     fn mount_as_child(&mut self, primitive: Primitive, parent: Option<PrimitiveId>) -> PrimitiveId {
+        println!("mounting {:?}! cursor: {}", &primitive, self.cursor);
         let id = PrimitiveId(self.counter);
         self.counter += 1;
         self.dom.insert(id, (primitive, Vec::new()));
         if let Some(pid) = parent {
-            self.dom.get_mut(&pid).unwrap().1.push(id);
+            self.dom
+                .get_mut(&pid)
+                .unwrap()
+                .1
+                .insert(self.cursor as usize, id);
         } else {
             self.roots.push(id);
         }
+        self.cursor += 1;
         id
     }
 
     fn get_sub_context(&mut self, id: PrimitiveId) -> (PrimitiveId, &mut dyn Dom) {
+        self.cursor = 0;
         (id, self)
     }
 
-    fn zero_cursor(&mut self) {
-        todo!()
+    fn set_cursor(&mut self, pos: u32) {
+        self.cursor = pos;
     }
 
-    fn increment_cursor(&mut self, _amount: u32) {
-        todo!()
+    fn get_cursor(&mut self) -> u32 {
+        self.cursor
     }
 }
 
@@ -106,8 +115,8 @@ fn demo() {
 
 fn app() -> Element {
     e::panel([
-        full_blinker.e(()),
         counter.e(()),
+        full_blinker.e(()),
         simple_blinker.e((3,)),
         simple_blinker.e((5,)),
     ])
